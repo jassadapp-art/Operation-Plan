@@ -1,16 +1,12 @@
 {
-  "name": "project-planning-server",
+  "name": "project-planning-app",
   "version": "1.0.0",
-  "description": "Backend API for Project Planning and Gantt Tracking App",
-  "main": "index.js",
-  "type": "module",
+  "description": "Project Planning & Schedule System with Gantt, RBAC, and Email Integration",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "multer": "^1.4.5-lts.1"
+    "start": "node server/index.js",
+    "build": "cd client && npm run build",
+    "render-build": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
+    "dev:client": "cd client && npm run dev",
+    "dev:server": "cd server && npm run dev"
   }
 }
