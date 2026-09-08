@@ -419,7 +419,7 @@ app.get('/api/notifications', (req, res) => {
 });
 
 // Serve frontend build if exists
-const clientDist = path.join(__dirname, '../client/dist');
+const clientDist = path.join(__dirname, 'dist');
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
   app.get('*', (req, res, next) => {
