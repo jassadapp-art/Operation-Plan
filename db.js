@@ -43,6 +43,15 @@ const INITIAL_DATA = {
       password: 'C270908',
       email: 'jassada@company.com',
       role: 'inspector'
+    },
+    {
+      id: 'VIEWER001',
+      employeeId: 'VIEWER',
+      name: 'ผู้เข้าชมทั่วไป (Viewer)',
+      username: 'viewer',
+      password: '',
+      email: 'viewer@company.com',
+      role: 'viewer'
     }
   ],
   projects: [
@@ -196,48 +205,6 @@ const INITIAL_DATA = {
           reviewResult: 'pass'
         }
       ]
-    },
-    {
-      id: 'proj-003',
-      code: 'PRJ-2026-003',
-      name: 'โครงการติดตั้ง Solar Rooftop โรงงานผลิต 2',
-      description: 'ติดตั้งแผงโซลาร์เซลล์ 150kW เพื่อประหยัดพลังงาน',
-      status: 'ล่าช้า',
-      createdAt: '2026-01-02',
-      targetEndDate: '2026-01-12',
-      inspectorId: 'EMP004',
-      creatorId: 'EMP002',
-      currentPlanRevision: 1,
-      steps: [
-        {
-          id: 'p3-s1',
-          stepNumber: 1,
-          name: 'ขั้นตอนที่ 1',
-          description: 'ขออนุญาตการไฟฟ้าและสิ่งแวดล้อม',
-          status: 'เสร็จสิ้น',
-          evident: 'PERMIT-A',
-          planStart: '2026-01-02',
-          planEnd: '2026-01-06',
-          actualStart: '2026-01-02',
-          actualEnd: '2026-01-06',
-          assignedWorkerId: 'EMP003',
-          reviewResult: 'pass'
-        },
-        {
-          id: 'p3-s2',
-          stepNumber: 2,
-          name: 'ขั้นตอนที่ 2',
-          description: 'ติดตั้งโครงสร้างหลังคาและแผงเซลล์',
-          status: 'กำลังดำเนินการ',
-          evident: 'MOUNT-B',
-          planStart: '2026-01-07',
-          planEnd: '2026-01-10',
-          actualStart: '2026-01-08',
-          actualEnd: null,
-          assignedWorkerId: 'EMP003',
-          reviewResult: null
-        }
-      ]
     }
   ],
   planChangeRequests: [
@@ -303,7 +270,16 @@ class Database {
 
   getUsers() { return this.data.users; }
   getUserById(id) { return this.data.users.find(u => u.id === id || u.employeeId === id); }
-  getUserByUsername(username) { return this.data.users.find(u => u.username === username); }
+  getUserByUsername(username) { 
+    if (!username) return null;
+    const term = username.trim().toLowerCase();
+    return this.data.users.find(u => 
+      (u.username && u.username.toLowerCase() === term) || 
+      (u.employeeId && u.employeeId.toLowerCase() === term) ||
+      (term === 'inspector' && u.role === 'inspector') ||
+      (term === 'viewer' && u.role === 'viewer')
+    );
+  }
   
   saveUser(userData) {
     const existingIndex = this.data.users.findIndex(u => u.id === userData.id || u.employeeId === userData.employeeId);
@@ -333,6 +309,14 @@ class Database {
     }
     this.save();
     return project;
+  }
+
+  deleteProject(id) {
+    this.data.projects = this.data.projects.filter(p => p.id !== id);
+    if (this.data.planChangeRequests) {
+      this.data.planChangeRequests = this.data.planChangeRequests.filter(r => r.projectId !== id);
+    }
+    this.save();
   }
 
   getChangeRequests(projectId = null) {

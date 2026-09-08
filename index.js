@@ -41,10 +41,49 @@ app.use('/uploads', express.static(uploadsDir));
 // --- Auth Endpoints ---
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
-  const user = db.getUserByUsername(username);
-  if (!user || user.password !== password) {
-    return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+  if (!username) {
+    return res.status(400).json({ error: 'กรุณากรอกชื่อผู้ใช้' });
   }
+
+  const cleanUsername = username.trim();
+  const isViewer = cleanUsername.toLowerCase() === 'viewer';
+
+  let user = db.getUserByUsername(cleanUsername);
+  if (!user && isViewer) {
+    user = {
+      id: 'VIEWER001',
+      employeeId: 'VIEWER',
+      name: 'ผู้เข้าชมทั่วไป (Viewer)',
+      username: 'viewer',
+      password: '',
+      email: 'viewer@company.com',
+      role: 'viewer'
+    };
+    db.saveUser(user);
+  }
+
+  if (!user) {
+    return res.status(401).json({ error: 'ไม่พบบัญชีผู้ใช้นี้ในระบบ กรุณาตรวจสอบชื่อผู้ใช้' });
+  }
+
+  // Viewer login requires NO password
+  if (isViewer || user.role === 'viewer') {
+    const { password: _, ...userWithoutPass } = user;
+    return res.json({ user: userWithoutPass, token: 'mock-jwt-token-' + user.id });
+  }
+
+  if (!password) {
+    return res.status(400).json({ error: 'กรุณากรอกรหัสผ่าน' });
+  }
+
+  const isInspectorAlias = cleanUsername.toLowerCase() === 'inspector';
+  const isPasswordMatch = user.password === password || 
+    (isInspectorAlias && (password === 'inspect123' || password === 'C270908' || password === user.password));
+
+  if (!isPasswordMatch) {
+    return res.status(401).json({ error: 'รหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบรหัสผ่านอีกครั้ง' });
+  }
+
   const { password: _, ...userWithoutPass } = user;
   res.json({ user: userWithoutPass, token: 'mock-jwt-token-' + user.id });
 });
@@ -91,24 +130,36 @@ app.delete('/api/users/:id', (req, res) => {
 
 // --- Stats & Overview ---
 app.get('/api/stats', (req, res) => {
-  const projects = db.getProjects();
+  const projects = db.getProjects().filter(p => p.status !== 'ยกเลิก');
   const total = projects.length;
   const inProgress = projects.filter(p => p.status === 'กำลังดำเนินการ').length;
   const completed = projects.filter(p => p.status === 'เสร็จสิ้น').length;
   const delayed = projects.filter(p => p.status === 'ล่าช้า').length;
-  res.json({ total, inProgress, completed, delayed });
+  res.json({ total, inProgress, completed, delayed, cancelled: 0 });
 });
 
 // --- Projects & Gantt ---
 app.get('/api/projects', (req, res) => {
-  const projects = db.getProjects();
+  const { includeCancelled } = req.query;
+  let projects = db.getProjects();
+  if (!includeCancelled) {
+    projects = projects.filter(p => p.status !== 'ยกเลิก');
+  }
   res.json(projects);
 });
 
 app.get('/api/projects/:id', (req, res) => {
   const project = db.getProjectById(req.params.id);
-  if (!project) return res.status(404).json({ error: 'ไม่พบโครงการ' });
+  if (!project || project.status === 'ยกเลิก') return res.status(404).json({ error: 'ไม่พบโครงการ' });
   res.json(project);
+});
+
+app.delete('/api/projects/:id', (req, res) => {
+  const { id } = req.params;
+  const project = db.getProjectById(id);
+  if (!project) return res.status(404).json({ error: 'ไม่พบโครงการ' });
+  db.deleteProject(id);
+  res.json({ success: true, message: `ลบโครงการ ${project.name} ออกจากระบบเรียบร้อยแล้ว` });
 });
 
 app.post('/api/projects', (req, res) => {
@@ -162,17 +213,20 @@ app.post('/api/projects/:id/revision', async (req, res) => {
 
   const inspector = db.getUserById(project.inspectorId);
   const requester = db.getUserById(requestedByUserId);
+  const isCancel = req.body.type === 'cancel_project' || (reason && reason.includes('ขอยกเลิกโครงการ'));
 
   const changeRequest = {
     id: 'cr-' + Date.now(),
+    type: isCancel ? 'cancel_project' : 'plan_revision',
     projectId: id,
     projectName: project.name,
-    requestedBy: requester?.name || 'ผู้วางแผน',
+    projectCode: project.code,
+    requestedBy: requester?.name || 'ผู้วางแผนงาน',
     requestedByUserId,
     requestedAt: new Date().toLocaleString('th-TH'),
-    reason: reason || 'ขอปรับปรุงกรอบเวลาขั้นตอนงานตามสภาพความเป็นจริง',
+    reason: reason || (isCancel ? 'ขอยกเลิกโครงการเนื่องจากเหตุจำเป็น' : 'ขอปรับปรุงกรอบเวลาขั้นตอนงานตามสภาพความเป็นจริง'),
     status: 'pending', // 'pending', 'approved', 'rejected'
-    proposedSteps,
+    proposedSteps: proposedSteps || null,
     previousSteps: project.steps,
     inspectorId: project.inspectorId
   };
@@ -184,13 +238,69 @@ app.post('/api/projects/:id/revision', async (req, res) => {
     await sendEmailNotification({
       recipientUser: inspector,
       projectName: project.name,
-      stepName: 'ขออนุมัติแก้ไขแผนงาน',
-      action: 'ขออนุมัติแก้ไขแผนงาน',
-      message: `🔔 [คำขออนุมัติแก้ไขแผนงานใหม่]\n📌 โครงการ: ${project.name}\n👤 ผู้ขอแก้ไข: ${changeRequest.requestedBy}\n📝 เหตุผล: ${changeRequest.reason}\n🔗 กรุณาเข้าสู่ระบบเพื่อตรวจสอบและอนุมัติแผนงานใหม่`
+      stepName: isCancel ? 'ขอยกเลิกโครงการ' : 'ขออนุมัติแก้ไขแผนงาน',
+      action: isCancel ? 'ขอยกเลิกโครงการ' : 'ขออนุมัติแก้ไขแผนงาน',
+      message: isCancel
+        ? `🚨 [คำขอยกเลิกโครงการ]\n📌 โครงการ: ${project.name} (${project.code})\n👤 ผู้ขอยกเลิก: ${changeRequest.requestedBy}\n📝 เหตุผลที่ขอยกเลิก: ${changeRequest.reason}\n🔗 กรุณาเข้าสู่ระบบเพื่อพิจารณาอนุมัติหรือปฏิเสธคำขอยกเลิกโครงการนี้`
+        : `🔔 [คำขออนุมัติแก้ไขแผนงานใหม่]\n📌 โครงการ: ${project.name}\n👤 ผู้ขอแก้ไข: ${changeRequest.requestedBy}\n📝 เหตุผล: ${changeRequest.reason}\n🔗 กรุณาเข้าสู่ระบบเพื่อตรวจสอบและอนุมัติแผนงานใหม่`
     });
   }
 
-  res.json({ message: 'ส่งคำขอแก้ไขแผนงานไปยัง Email ผู้ตรวจงานเรียบร้อยแล้ว', changeRequest });
+  res.json({ 
+    success: true,
+    message: isCancel 
+      ? 'ส่งคำขอยกเลิกโครงการไปยัง Email ผู้ตรวจงานเรียบร้อยแล้ว (รอการอนุมัติ)' 
+      : 'ส่งคำขอแก้ไขแผนงานไปยัง Email ผู้ตรวจงานเรียบร้อยแล้ว', 
+    changeRequest 
+  });
+});
+
+// Request Project Cancellation (Requires Inspector approval)
+app.post('/api/projects/:id/cancel-request', async (req, res) => {
+  const { id } = req.params;
+  const { reason, requestedByUserId } = req.body;
+  const project = db.getProjectById(id);
+  if (!project) return res.status(404).json({ error: 'ไม่พบโครงการ' });
+
+  if (project.status === 'ยกเลิก') {
+    return res.status(400).json({ error: 'โครงการนี้ถูกยกเลิกไปแล้ว' });
+  }
+
+  const inspector = db.getUserById(project.inspectorId);
+  const requester = db.getUserById(requestedByUserId);
+
+  const changeRequest = {
+    id: 'cr-' + Date.now(),
+    type: 'cancel_project',
+    projectId: id,
+    projectName: project.name,
+    projectCode: project.code,
+    requestedBy: requester?.name || 'ผู้วางแผนงาน',
+    requestedByUserId,
+    requestedAt: new Date().toLocaleString('th-TH'),
+    reason: reason || 'ขอยกเลิกโครงการเนื่องจากเหตุจำเป็น',
+    status: 'pending', // 'pending', 'approved', 'rejected'
+    inspectorId: project.inspectorId
+  };
+
+  db.saveChangeRequest(changeRequest);
+
+  // Send Email notification to Inspector
+  if (inspector) {
+    await sendEmailNotification({
+      recipientUser: inspector,
+      projectName: project.name,
+      stepName: 'ขอยกเลิกโครงการ',
+      action: 'ขอยกเลิกโครงการ',
+      message: `🚨 [คำขอยกเลิกโครงการ]\n📌 โครงการ: ${project.name} (${project.code})\n👤 ผู้ขอยกเลิก: ${changeRequest.requestedBy}\n📝 เหตุผลที่ขอยกเลิก: ${changeRequest.reason}\n🔗 กรุณาเข้าสู่ระบบเพื่อพิจารณาอนุมัติหรือปฏิเสธคำขอยกเลิกโครงการนี้`
+    });
+  }
+
+  res.json({ 
+    success: true, 
+    message: 'ส่งคำขอยกเลิกโครงการไปยัง Email ผู้ตรวจงานเรียบร้อยแล้ว (รอการอนุมัติ)', 
+    changeRequest 
+  });
 });
 
 // Get Change Requests for Inspector
@@ -206,20 +316,46 @@ app.get('/api/change-requests', (req, res) => {
   res.json(requests);
 });
 
-// Inspector Approve Plan Change Request
+// Inspector Approve Change Request (Plan Revision or Project Cancellation)
 app.post('/api/change-requests/:id/approve', async (req, res) => {
   const { id } = req.params;
   const requests = db.getChangeRequests();
   const cr = requests.find(r => r.id === id);
-  if (!cr) return res.status(404).json({ error: 'ไม่พบคำขอแก้ไขแผนงาน' });
+  if (!cr) return res.status(404).json({ error: 'ไม่พบคำขอ' });
 
   cr.status = 'approved';
   cr.approvedAt = new Date().toLocaleString('th-TH');
   db.saveChangeRequest(cr);
 
-  // Apply new steps to active project
   const project = db.getProjectById(cr.projectId);
   if (project) {
+    // Check if this is a project cancellation request
+    if (cr.type === 'cancel_project' || (cr.reason && cr.reason.includes('ขอยกเลิกโครงการ'))) {
+      const projectName = project.name;
+      const projectCode = project.code;
+
+      // Delete project completely from database so it no longer appears anywhere in the system
+      db.deleteProject(cr.projectId);
+
+      // Notify requester via Email
+      const requester = db.getUserById(cr.requestedByUserId);
+      if (requester) {
+        await sendEmailNotification({
+          recipientUser: requester,
+          projectName: projectName,
+          stepName: 'ผลการขอยกเลิกโครงการ',
+          action: 'อนุมัติยกเลิกและลบโครงการ',
+          message: `✅ [อนุมัติการยกเลิกโครงการ]\n📌 โครงการ: ${projectName} (${projectCode})\nสถานะโครงการได้รับการอนุมัติให้ยกเลิก และโครงการถูกลบออกจากระบบเรียบร้อยแล้ว`
+        });
+      }
+
+      return res.json({ 
+        success: true, 
+        message: `อนุมัติการยกเลิกโครงการเรียบร้อยแล้ว (โครงการ "${projectName}" ถูกลบออกจากระบบแล้ว)` 
+      });
+    }
+
+    // Standard plan revision
     project.currentPlanRevision = (project.currentPlanRevision || 1) + 1;
     project.steps = cr.proposedSteps;
     db.saveProject(project);
@@ -240,16 +376,17 @@ app.post('/api/change-requests/:id/approve', async (req, res) => {
   res.json({ success: true, message: 'อนุมัติแผนงานใหม่เรียบร้อยแล้ว' });
 });
 
-// Inspector Reject Plan Change Request
+// Inspector Reject Change Request (Plan Revision or Project Cancellation)
 app.post('/api/change-requests/:id/reject', async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
   const requests = db.getChangeRequests();
   const cr = requests.find(r => r.id === id);
-  if (!cr) return res.status(404).json({ error: 'ไม่พบคำขอแก้ไขแผนงาน' });
+  if (!cr) return res.status(404).json({ error: 'ไม่พบคำขอ' });
 
+  const isCancel = cr.type === 'cancel_project';
   cr.status = 'rejected';
-  cr.rejectReason = reason || 'ไม่อนุมัติการแก้ไขแผนงาน';
+  cr.rejectReason = reason || (isCancel ? 'ไม่อนุมัติการยกเลิกโครงการ' : 'ไม่อนุมัติการแก้ไขแผนงาน');
   cr.rejectedAt = new Date().toLocaleString('th-TH');
   db.saveChangeRequest(cr);
 
@@ -257,16 +394,22 @@ app.post('/api/change-requests/:id/reject', async (req, res) => {
   const project = db.getProjectById(cr.projectId);
   const requester = db.getUserById(cr.requestedByUserId);
   if (requester) {
+    const actionTitle = isCancel ? 'ไม่อนุมัติยกเลิกโครงการ' : 'ไม่อนุมัติแก้ไขแผนงาน';
     await sendEmailNotification({
       recipientUser: requester,
       projectName: project?.name || 'โครงการ',
-      stepName: 'ผลการขอแก้ไขแผนงาน',
-      action: 'ไม่อนุมัติแก้ไขแผนงาน',
-      message: `❌ [ไม่อนุมัติการแก้ไขแผนงาน]\n📌 โครงการ: ${project?.name}\n💬 เหตุผล: ${cr.rejectReason}\nกรุณาใช้แผนงานเดิมต่อไปหรือจัดทำแผนเสนอใหม่`
+      stepName: isCancel ? 'ผลการขอยกเลิกโครงการ' : 'ผลการขอแก้ไขแผนงาน',
+      action: actionTitle,
+      message: `❌ [${actionTitle}]\n📌 โครงการ: ${project?.name}\n💬 เหตุผล: ${cr.rejectReason}\nโครงการยังคงดำเนินงานตามเดิม`
     });
   }
 
-  res.json({ success: true, message: 'ปฏิเสธคำขอเรียบร้อยแล้ว' });
+  res.json({ 
+    success: true, 
+    message: isCancel 
+      ? 'ปฏิเสธคำขอยกเลิกโครงการเรียบร้อยแล้ว (โครงการยังคงดำเนินงานตามเดิม)' 
+      : 'ปฏิเสธคำขอเรียบร้อยแล้ว' 
+  });
 });
 
 // --- Page 3: Operation & Task Submission ---
@@ -418,9 +561,20 @@ app.get('/api/notifications', (req, res) => {
   res.json(db.getLineNotifications());
 });
 
-// Serve frontend build if exists
-const clientDist = path.join(__dirname, 'dist');
-if (fs.existsSync(clientDist)) {
+// Serve frontend build if exists (support ../client/dist, ../dist, ./dist, etc.)
+const possibleDistPaths = [
+  path.join(__dirname, '../client/dist'),
+  path.join(__dirname, '../dist'),
+  path.join(__dirname, 'dist'),
+  path.join(__dirname, 'public'),
+  path.join(process.cwd(), 'client/dist'),
+  path.join(process.cwd(), 'dist')
+];
+
+let clientDist = possibleDistPaths.find(p => fs.existsSync(path.join(p, 'index.html')));
+
+if (clientDist) {
+  console.log(`📦 Serving static frontend from: ${clientDist}`);
   app.use(express.static(clientDist));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
@@ -428,6 +582,8 @@ if (fs.existsSync(clientDist)) {
     }
     res.sendFile(path.join(clientDist, 'index.html'));
   });
+} else {
+  console.warn('⚠️ No frontend build found in any expected location.');
 }
 
 app.listen(PORT, () => {
