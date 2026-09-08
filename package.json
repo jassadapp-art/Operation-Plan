@@ -1,12 +1,13 @@
 {
   "name": "project-planning-app",
   "version": "1.0.0",
-  "description": "Project Planning & Schedule System with Gantt, RBAC, and Email Integration",
+  "type": "module",
   "scripts": {
-    "start": "node server/index.js",
-    "build": "cd client && npm run build",
-    "render-build": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
-    "dev:client": "cd client && npm run dev",
-    "dev:server": "cd server && npm run dev"
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
   }
 }
